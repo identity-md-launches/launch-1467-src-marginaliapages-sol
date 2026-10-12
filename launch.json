@@ -1,0 +1,16 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "MarginaliaPages",
+      "constructorArgs": [
+        "0xf0457dd0cf526686190e4f057ba19db14d34a0cc",
+        "0xd0c0d97aebe9194606bcc46ce56524eee4615543",
+        "0x1397434cd35e8a9C8aC312A61D3A285EB31dea56",
+        "0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000",
+        "0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982"
+      ]
+    }
+  ],
+  "notes": "Deploy only MarginaliaPages v0.10 from src/MarginaliaPages.sol on Ethereum mainnet, replacing the unused v0.9 Pages deployment of job 0925298b. Constructor arguments are the live MarginaliaHook (launch 1283), live MarginaliaAnnex (launch 1384), IdentityMD Intake, the right-zero-padded bytes32 ASCII value oracle.request@oracle-1, and the IdentityMD oracle signer, in that order. Pages are nontransferable and priced in IMD at min(0.05 IMD times page number, 10 IMD), reaching the cap at page 200, with at most 10 pages per wallet per subject. Buying requires the settled whitelist, 10,000 MARG, or a posted hook or annex note; selling is ungated. Each trade charges 10%, split 80% of the fee to the issuer, 10% to MARG purchases sent to the burn address, and 10% to hook pools; failed burn swaps retain their share for permissionless retry. Handle issuer fees remain in escrow until an oracle-attested claim succeeds, or are recyclable after 90 days while no claim is pending. Claims use the IdentityMD Oracle v2 domain, a five-member panel, quorum four, maximum oracle price 1 IMD, and a three-day abandonment deadline. The constructor reads no external chain state. There is no owner, pause, upgrade, deployment funding, or initialization call."
+}

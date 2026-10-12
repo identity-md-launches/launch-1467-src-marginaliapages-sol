@@ -1,3 +1,160 @@
+# MarginaliaPages v0.10 launch adaptation — 2026-10-12
+
+This assignment deploys **one application contract**, `src/MarginaliaPages.sol:MarginaliaPages`,
+on Ethereum mainnet. It replaces the unused Pages v0.9 deployment from job `0925298b`. The hook,
+Annex, MARG, router, judge, treasury and pricer are existing dependencies, not this launch's
+contracts. The older adaptation reports below are retained history, not changes made by this job.
+
+## Constructor and deployment handoff
+
+The existing nonpayable constructor already has the required five static arguments and makes no
+external calls. It was retained. The launch service must use these exact arguments, in order:
+
+| Argument | Value |
+|---|---|
+| hook | `0xf0457dd0cf526686190e4f057ba19db14d34a0cc` (launch 1283) |
+| annex | `0xd0c0d97aebe9194606bcc46ce56524eee4615543` (launch 1384) |
+| intake | `0x1397434cd35e8a9C8aC312A61D3A285EB31dea56` (v1) |
+| action | `0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000` |
+| signer | `0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982` |
+
+The action is the right-padded UTF-8 `bytes32("oracle.request@oracle-1")`, not its hash. No owner,
+initializer, administrator, proxy, upgrade, pause, token, pool or external library deployment was
+added. The annex-zero option still disables that gate leg. No mainnet transaction was sent and no
+wallet key was read. The subsequent manifest/deployment steps own `launch.json` and the resulting
+Pages address; this job does not create a manifest or use the old Pages address.
+
+All specified economics remain: BASE 0.05 IMD, CAP 10 IMD at page 200, ten pages per wallet and
+subject, MARG gate 10,000, the fixed whitelist, 10% trade fee split 80/10/10, 90-day recycling,
+three-day abandonment, five oracle seats, quorum four, MAX_PRICE 1 IMD and the specified burn
+recipient. The reserve is still the exact sum of the capped curve, without fees.
+
+## Changes and reasons
+
+- `src/MarginaliaPages.sol`: isolate a failed automatic burn swap with `try/catch`, accrue exactly
+  its IMD share in public `pendingBurn`, and emit `BurnDeferred`. Add permissionless,
+  `nonReentrant` `burn(imdIn, minMargOut)` to retry a bounded tranche. A failed/partial retry or
+  insufficient output reverts atomically; it cannot spend curve collateral or handle escrow.
+  A healthy trade still burns its own share immediately. Earlier pending burns are retried
+  explicitly, so an accumulated backlog never becomes a new requirement on trades. This fixes
+  reproduced finding `f1692f43` without changing the fee split or recipients.
+- `src/MarginaliaPages.sol`: add `claimMessage(wallet)` and require the exact statement in the
+  generated oracle question. The statement assigns the author's payout wallet for this Pages
+  deployment and chain; the contract address in its prefix is not the answer. The panel must
+  return zero for warnings, donations, quotes, retweets, unrelated address mentions or extra
+  text. The definitions include the exact prefix. This fixes reproduced finding `fa96375f` at
+  the question that caused it. The EVM still trusts the specified panel/signer to read the tweet;
+  no on-chain test claims to verify external tweet content. Permanent successful claims remain
+  permanent: no payee rotation or new privileged role was added.
+- `src/MarginaliaPages.sol`: add permissionless `registerHandle(handle)` and `registeredHandle`,
+  with `HandleRegistered`. Registration validates and normalizes a handle preimage, grants no
+  ownership and starts no escrow/claim clock. `buy` rejects zero and non-address ids that were
+  not registered. `subjectOfHandle` remains a pure hash helper, and ordinary address subjects
+  need no registration. This closes both zero and arbitrary-hash variants of `64bd6a07` rather
+  than silently creating unclaimable escrow. Integrators register each handle once before buying
+  its id; this is the one additional step required by subject validation.
+- `src/MarginaliaPages.sol`: normalize/validate the public `questionBody` preview itself using
+  the same memory-based `normalizeHandle` helper as the real request, keeping JSON generation
+  safe and previews identical for mixed-case handles. Add `nonReentrant` to `abandonClaim`, as
+  the brief requires for claims; a hostile Intake reentry regression checks the guard.
+- `test/Pages.t.sol`: keep all 14 original behavior tests and assertions. Extract their existing
+  setup/signing helpers into `PagesFixture` for reuse, and register handles before their first
+  raw-id purchase to exercise the new validation rule. No economics or security assertion was
+  weakened.
+- `test/PagesAudit.t.sol`: regressions for exhausted/withdrawn liquidity, ungated exits, deferred
+  accounting, failed and partial swaps, retry limits/slippage, fee segregation, arbitrary/zero
+  subject rejection, registration, exact claim wording and JSON, deployment/chain binding,
+  oracle-UUID replay, reentrant abandonment and fail-soft whitelist reads. A 256-case fuzz test
+  checks reserve plus escrow plus pending-burn solvency after varying buys and sells. The
+  mandated recycling and unanswered-request behaviors have explicit regression tests too.
+- `test/PagesDeployment.t.sol`: CREATE2 deployment on an empty EVM with the exact five mainnet
+  arguments, unchanged constants, required-argument rejection, size/opcode checks and no
+  dependency reads. The oracle conformance suite retains the supplied protocol vector's digest,
+  signature, chain and consumer address, checks the canonical callback selector, and delivers a
+  fresh address answer under the 200,000-gas stipend. A verification-only test harness handles
+  the protocol vector's different answer type without relaxing production callback rules.
+- `test/fork/PagesMainnet.t.sol`: optional, pinned mainnet fork at block **26178476**. Reads live
+  dependency constants, rehearses the exact mainnet constructor and a buy/sell against the live
+  launch pool. A separate deployment with a local Intake and EOA signer exercises the real IMD
+  token's callback payments to fresh zero-balance wallets under the actual 200,000-gas call cap.
+  These mock roles exist only on the fork. The suite explicitly skips if no RPC is configured.
+- `launch.json`: remove the inherited `univ4_hook` manifest for the already-deployed token and
+  hook. Leaving it would select the wrong launch mode/contracts. No replacement manifest is
+  written here; the subsequent manifest step creates the Pages-only `evm_contracts` handoff.
+- `README.md` and `SPEC.md`: identify this as the single-contract Pages launch, document the
+  exact constructor wiring, new registration and explicit-claim steps, burn retry, and preserved
+  deadline limitations. This file records each change and finding disposition.
+
+## Imported audit: reproduction and disposition
+
+The original `test/Pages.t.sol` passed **14/14** before edits. Audit recipes were rebuilt in scratch
+and run against the original source: nine probes, with five failing safety expectations (both
+burn-liveness scenarios, arbitrary and zero subject refusal, and missing explicit claim intent).
+Four probes confirmed the original permanent-attestation behavior, first-buy recycling rule,
+permissionless abandonment/recycling sequence and successful stipend delivery to fresh wallets.
+Those temporary probes are replaced by the delivered regressions above.
+
+| Finding | Result |
+|---|---|
+| `f1692f43` — burn swap freezes trades | **Reproduced and fixed.** The sold-out pool produced `PriceLimitAlreadyExceeded`; withdrawing all liquidity produced the hook's wrapped `PartialFill`. Both now allow buys and complete holder exits while preserving the burn liability. |
+| `fa96375f` — unrelated tweet permanently assigns payee | **Reproduced and fixed.** The original question lacked claim intent and any attested address was accepted permanently. The revised question requires the exact deployment-bound payout statement. Ordinary correctly attested claims remain permanent, as specified. |
+| `ec7f3f1e` — recycle sweeps recent fees | **Reproduced specified behavior; retained.** A 0.004 IMD initial escrow plus 0.260 IMD added at day 90 can all be recycled. The brief explicitly measures from the first buy, not each deposit. Changing to a rolling clock or fee tranches would change that rule. |
+| `64bd6a07` — arbitrary subject escrow | **Reproduced and fixed.** Both zero and unregistered non-address hashes now revert before taking IMD. A validated registration makes legitimate handle ids buyable. |
+| `fb9da0ba` — pending claim locks / abandon then recycle | **Reproduced specified behavior; retained.** One permissionless request remains exclusive for up to three days; anyone may abandon after that deadline and recycle matured escrow immediately. No new grace period or requester-only right was introduced because both contradict the brief. Late answers after abandonment remain refused. |
+| `cf2de0db` — callback stipend margin | **No failure reproduced for the requested deployment.** Fresh-wallet callback tests pass locally and with the live IMD contract on the mainnet fork, using an EOA signer and a hard 200,000-gas callback cap. RPC confirms the specified signer has no code. A substituted ERC-1271 signer/heavier token is a different dependency configuration. Preserve the required direct callback payouts; no artificial two-stage payout was added. |
+| `f184b47d` — Intake v1 has no failure callback | **Reproduced protocol limitation; retained.** The task pins v1 and `request`; it provides the three-day abandonment path. Switching to v2, adding owner-settable dependencies or inventing an unsigned failure callback would violate the requested deployment. |
+| `dbe612b4` — prior audit scope | **Informational, not a defect.** Updated scope and actual checks are recorded here. Existing deployed companion behavior is not redesigned. |
+
+The 90-day and three-day findings are documented limitations explicitly required by the brief,
+not unfixed implementation deviations. The oracle cannot establish ownership independently of the
+external panel's reading and signer; the exact statement prevents the reported interpretation of
+unrelated tweets but does not replace that trust assumption.
+
+## Validation of this Pages adaptation
+
+The first all-at-once compilation of the remaining 24 test files ended with `solc` receiving
+SIGKILL. The suites were compiled and run in smaller sequential groups, with the same pinned
+compiler, optimizer, via-IR and EVM settings, before retrying the ordinary whole-project checks.
+No compiler setting or dependency was changed for this workaround.
+
+- Final `forge build`: **passed**, using the unchanged project configuration (lint warnings,
+  no errors). After the incremental compilations, the ordinary command reported no changed files.
+- Final `forge test`: **345 passed, 0 failed, 2 skipped** across 29 suites. The two skips are the
+  historical hook fork and the new Pages fork suite setups when `MAINNET_RPC_URL` is absent.
+  All 14 original Pages tests are retained and pass. New delivered tests comprise 15 audit
+  regressions and six deployment/conformance checks. Fuzzing uses the configured 256 runs;
+  existing invariant runs/depth remain 64/64.
+- `MAINNET_RPC_URL=http://127.0.0.1:46019/rpc/1 forge test --match-path
+  test/fork/PagesMainnet.t.sol -vv`: **2 passed, 0 failed**, against pinned block **26178476**.
+  This tests the exact live wiring, quiet fee burns, curve exits and successful fresh-wallet
+  payouts with the real IMD token through a mock Intake's hard **200,000-gas** callback cap.
+  No actual oracle request or mainnet deployment is implied by the fork.
+- The supplied `Contracts.protected.t.sol` was copied **unchanged** to scratch and passed
+  (**1 test**) with chain id 1 and exactly one application, this Pages creation bytecode plus
+  the five given constructor arguments. The scratch copy was removed afterward. The token
+  and hook floors are not applicable to this contracts-only deployment; no new token or hook
+  is launched.
+- Pages runtime is **18,010 bytes**; creation bytecode is **19,505 bytes**, or **19,665 bytes**
+  including constructor arguments. Both are below the EIP-170/EIP-3860 limits. No external
+  library links, `DELEGATECALL`, `CALLCODE` or `SELFDESTRUCT` occur in its deployable runtime.
+- Read-only mainnet calls confirmed code at the hook, Annex, Intake, IMD, MARG and whitelist
+  addresses; the given signer has no code. Hook `INTAKE`, `ACTION`, `ORACLE_SIGNER`, `imd`,
+  `token` and `poolManager` matched the request. The Intake quoted **0.5 IMD**; IMD reports
+  18 decimals and symbol IMD. Both live `records` prefixes and `contributedBy` decoded using
+  the exact interfaces Pages uses.
+- A SHA-256 comparison of all **411** protected configuration/dependency/lock files found
+  no changes. No scratch source or validation-only environment input is needed by the
+  delivered tests. The normal suite runs offline with the project's existing dependencies.
+
+No dependencies were installed. Build configuration, dependencies, lockfiles, `.git`, `.github`,
+environment files and `node_modules` were not modified. Tests and constructor rehearsals use
+local EVM time advances; no real-time oracle/checkpoint wait was started. No Slither, Mythril,
+mainnet broadcast, paid oracle request or explorer verification is claimed.
+
+---
+
+# Earlier launch history (unchanged)
+
 # Independent-review revision — 2026-10-11
 
 This is a revision of the accepted hook launch, not a new implementation. The only executable

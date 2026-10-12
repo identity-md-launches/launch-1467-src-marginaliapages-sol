@@ -38,10 +38,12 @@ contract ClaimIntake is IIntake {
         lastRequestId = requestId;
     }
 
-    function deliver(address target, bytes32 requestId, OracleAttestation.Attestation calldata a, bytes calldata sig)
-        external
-        returns (bool ok)
-    {
+    function deliver(
+        address target,
+        bytes32 requestId,
+        OracleAttestation.Attestation calldata a,
+        bytes calldata sig
+    ) external returns (bool ok) {
         (ok,) = target.call{gas: 200_000}(abi.encodeCall(MarginaliaPages.onOracleResult, (requestId, a, sig)));
     }
 }
@@ -71,7 +73,7 @@ contract MockAnnexRecords {
 /// @dev The page market against the local hook: the capped curve, fee split (issuer / MARG burn / pools), the
 /// per-wallet limit, the buy gate (whitelist / MARG / notes), handle escrow, oracle-attested claims, abandonment,
 /// recycling, and that pages never move.
-contract PagesTest is Fixture {
+abstract contract PagesFixture is Fixture {
     MarginaliaPages pages;
     ClaimIntake intake;
     MockWhitelist whitelist;
@@ -87,7 +89,11 @@ contract PagesTest is Fixture {
         intake = new ClaimIntake();
         annexRecords = new MockAnnexRecords();
         pages = new MarginaliaPages(
-            IMarginaliaHookPages(address(hook)), IMarginaliaRecords(address(annexRecords)), intake, ACTION, signerAddr
+            IMarginaliaHookPages(address(hook)),
+            IMarginaliaRecords(address(annexRecords)),
+            intake,
+            ACTION,
+            signerAddr
         );
         whitelist = new MockWhitelist();
         vm.etch(pages.WHITELIST(), address(whitelist).code);
@@ -115,6 +121,58 @@ contract PagesTest is Fixture {
         imd.approve(address(pages), type(uint256).max);
     }
 
+    function _att(bytes32 requestId, address wallet)
+        internal
+        view
+        returns (OracleAttestation.Attestation memory a)
+    {
+        a.requestId = requestId;
+        a.chainId = block.chainid;
+        a.questionHash = keccak256("question");
+        a.answerType = OracleAttestation.ANSWER_ADDRESS;
+        a.answer = abi.encode(wallet);
+        a.fromBlock = 1;
+        a.toBlock = 2;
+        a.blockHash = keccak256("block");
+        a.panelJobId = keccak256("job");
+        a.panelSize = 5;
+        a.quorum = 4;
+        a.agreed = 5;
+        a.issuedAt = uint64(vm.getBlockTimestamp());
+        a.expiresAt = uint64(vm.getBlockTimestamp() + 1 days);
+    }
+
+    function _sign(OracleAttestation.Attestation memory a) internal view returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(SIGNER_KEY, pages.attestationDigest(a));
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _twentyOf(bytes32 subject) internal {
+        vm.prank(alice);
+        pages.buy(subject, 10, type(uint256).max);
+        vm.prank(bob);
+        pages.buy(subject, 10, type(uint256).max);
+    }
+
+    function _contains(string memory hay, string memory needle) internal pure returns (bool) {
+        bytes memory h = bytes(hay);
+        bytes memory n = bytes(needle);
+        if (n.length > h.length) return false;
+        for (uint256 i = 0; i + n.length <= h.length; ++i) {
+            bool hit = true;
+            for (uint256 j = 0; j < n.length; ++j) {
+                if (h[i + j] != n[j]) {
+                    hit = false;
+                    break;
+                }
+            }
+            if (hit) return true;
+        }
+        return false;
+    }
+}
+
+contract PagesTest is PagesFixture {
     // ------------------------------------------------------------------ curve and fees
 
     function testCurveIsLinearThenCapped() public view {
@@ -275,40 +333,12 @@ contract PagesTest is Fixture {
         pages.subjectOfHandle("no spaces");
     }
 
-    function _att(bytes32 requestId, address wallet) internal view returns (OracleAttestation.Attestation memory a) {
-        a.requestId = requestId;
-        a.chainId = block.chainid;
-        a.questionHash = keccak256("question");
-        a.answerType = OracleAttestation.ANSWER_ADDRESS;
-        a.answer = abi.encode(wallet);
-        a.fromBlock = 1;
-        a.toBlock = 2;
-        a.blockHash = keccak256("block");
-        a.panelJobId = keccak256("job");
-        a.panelSize = 5;
-        a.quorum = 4;
-        a.agreed = 5;
-        a.issuedAt = uint64(vm.getBlockTimestamp());
-        a.expiresAt = uint64(vm.getBlockTimestamp() + 1 days);
-    }
-
-    function _sign(OracleAttestation.Attestation memory a) internal view returns (bytes memory) {
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(SIGNER_KEY, pages.attestationDigest(a));
-        return abi.encodePacked(r, s, v);
-    }
-
     /// @dev Twenty pages of a handle from two wallets (the per-wallet limit): enough escrow to cover the price.
-    function _twentyOf(bytes32 subject) internal {
-        vm.prank(alice);
-        pages.buy(subject, 10, type(uint256).max);
-        vm.prank(bob);
-        pages.buy(subject, 10, type(uint256).max);
-    }
 
     /// @dev Pages of an unclaimed handle escrow the issuer's share; the panel's answer names the wallet, which
     /// collects the escrow less the oracle price reimbursed to whoever asked, and is paid from then on.
     function testEscrowThenOracleAttestedClaim() public {
-        bytes32 subject = pages.subjectOfHandle("blknoiz06");
+        bytes32 subject = pages.registerHandle("blknoiz06");
         assertEq(pages.payeeOf(subject), address(0));
         uint64 firstBuy = uint64(vm.getBlockTimestamp());
         _twentyOf(subject); // 10.5 IMD of pages → 1.05 fee → 0.84 escrow, above the oracle price
@@ -370,7 +400,7 @@ contract PagesTest is Fixture {
     /// @dev A stranger's bogus claim costs the stranger: the panel answers zero, the escrow is untouched, the
     /// handle can be asked about again at once, and a third party who asks correctly is reimbursed from escrow.
     function testBogusClaimCostsOnlyTheClaimantAndIsRetriable() public {
-        bytes32 subject = pages.subjectOfHandle("ghost");
+        bytes32 subject = pages.registerHandle("ghost");
         _twentyOf(subject); // escrow 0.84 IMD, above the oracle price
         (,, uint256 escrow,) = pages.subjects(subject);
         uint256 bobBefore = imd.balanceOf(bob);
@@ -391,12 +421,14 @@ contract PagesTest is Fixture {
         assertTrue(intake.deliver(address(pages), requestId, a, _sign(a)));
         assertEq(pages.payeeOf(subject), carol);
         assertEq(imd.balanceOf(bob), bobBefore, "the asker got the price back from the escrow");
-        assertEq(imd.balanceOf(carol) - carolBefore, escrow - 0.5 ether, "the owner nets the escrow less the price");
+        assertEq(
+            imd.balanceOf(carol) - carolBefore, escrow - 0.5 ether, "the owner nets the escrow less the price"
+        );
     }
 
     /// @dev Tiny escrow: the price is not reimbursed and the owner gets what is there.
     function testSmallEscrowIsPaidWithoutReimbursement() public {
-        bytes32 subject = pages.subjectOfHandle("tiny");
+        bytes32 subject = pages.registerHandle("tiny");
         vm.prank(alice);
         pages.buy(subject, 1, type(uint256).max); // 0.05 IMD value → 0.005 fee → 0.004 escrow
         (,, uint256 escrow,) = pages.subjects(subject);
@@ -412,7 +444,7 @@ contract PagesTest is Fixture {
     /// @dev Bad answers are refused without closing the claim: wrong signer, wrong chain, thin panel, wrong type,
     /// an unknown request, a caller that is not the Intake, and an expired attestation.
     function testRejectedAnswersDoNotCloseTheClaim() public {
-        bytes32 subject = pages.subjectOfHandle("strict");
+        bytes32 subject = pages.registerHandle("strict");
         vm.prank(alice);
         pages.buy(subject, 2, type(uint256).max);
         vm.prank(carol);
@@ -462,7 +494,7 @@ contract PagesTest is Fixture {
     /// @dev An unanswered claim is abandoned after the deadline, a late delivery is then refused, and the
     /// subject can be asked about again. Recycling waits for a pending claim.
     function testAbandonAfterDeadlineAndRecycleWaitsForPendingClaims() public {
-        bytes32 subject = pages.subjectOfHandle("quiet");
+        bytes32 subject = pages.registerHandle("quiet");
         vm.prank(alice);
         pages.buy(subject, 4, type(uint256).max);
         (,, uint256 escrow,) = pages.subjects(subject);
@@ -506,22 +538,5 @@ contract PagesTest is Fixture {
     function testOnlyThePoolManagerMayCallBack() public {
         vm.expectRevert(MarginaliaPages.UnauthorizedCallback.selector);
         pages.unlockCallback(abi.encode(uint256(1)));
-    }
-
-    function _contains(string memory hay, string memory needle) internal pure returns (bool) {
-        bytes memory h = bytes(hay);
-        bytes memory n = bytes(needle);
-        if (n.length > h.length) return false;
-        for (uint256 i = 0; i + n.length <= h.length; ++i) {
-            bool hit = true;
-            for (uint256 j = 0; j < n.length; ++j) {
-                if (h[i + j] != n[j]) {
-                    hit = false;
-                    break;
-                }
-            }
-            if (hit) return true;
-        }
-        return false;
     }
 }
